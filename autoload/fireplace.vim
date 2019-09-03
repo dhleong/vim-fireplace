@@ -410,13 +410,28 @@ endfunction
 
 let s:repl.path = s:repl.Path
 
+function! s:onReplMessageResponse(repl, messageArgs) dict abort
+  let session = self.Session()
+  return call(session.message, a:messageArgs, session)
+endfunction
+
 function! s:repl.message(payload, ...) dict abort
+  for l:Arg in a:000
+    if type(Arg) == v:t_func
+      let l:Callback = function('s:onReplPreload', [self, a:payload] + a:000, self)
+    endif
+  endfor
   call s:NormalizeNs(self, a:payload)
   if has_key(a:payload, 'ns') && a:payload.ns !=# self.UserNs()
-    let ignored_error = self.preload(a:payload.ns)
+    let response = self.preload(a:payload.ns, exists('l:Callback') ? l:Callback : v:t_dict)
   endif
-  let session = self.Session()
-  return call(session.message, [a:payload] + a:000, session)
+
+  if !exists('s:Callback')
+    let session = self.Session()
+    return call(session.message, [a:payload] + a:000, session)
+  else
+    return response
+  endif
 endfunction
 
 let s:repl.Message = s:repl.message
@@ -431,7 +446,19 @@ function! s:repl.done(id) dict abort
   endif
 endfunction
 
-function! s:repl.preload(lib) dict abort
+function! s:onReplPreload(Callback, self, lib, result) abort
+  let self = a:self
+  let result = a:result
+  let self.requires[a:lib] = !has_key(result, 'ex')
+  call a:Callback(a:result)
+endfunction
+
+function! s:repl.preload(lib, ...) dict abort
+  for l:Arg in a:000
+    if type(Arg) == v:t_func
+      let l:Callback = function('s:onReplPreload', [Arg])
+    endif
+  endfor
   if !empty(a:lib) && a:lib !=# self.UserNs() && !get(self.requires, a:lib)
     let reload = has_key(self.requires, a:lib) ? ' :reload' : ''
     let self.requires[a:lib] = 0
@@ -443,10 +470,14 @@ function! s:repl.preload(lib) dict abort
     else
       let expr = '(ns '.self.UserNs().' (:require '.a:lib.reload.'))'
     endif
-    let result = self.message({'op': 'eval', 'code': expr, 'ns': self.UserNs(), 'session': ''}, v:t_dict)
-    let self.requires[a:lib] = !has_key(result, 'ex')
-    if has_key(result, 'ex')
-      return result
+    let result = self.message({'op': 'eval', 'code': expr, 'ns': self.UserNs(), 'session': ''}, exists('l:Callback') ? l:Callback : v:t_dict)
+    if exists('l:Callback')
+      return {}
+    else
+      let self.requires[a:lib] = !has_key(result, 'ex')
+      if has_key(result, 'ex')
+        return result
+      endif
     endif
   endif
   return {}
@@ -464,7 +495,7 @@ function! s:repl.Eval(...) dict abort
     endif
   endfor
   let options = s:NormalizeNs(self, options)
-  if has_key(options, 'ns') && options.ns !=# self.UserNs()
+  if has_key(options, 'ns') && options.ns !=# self.UserNs() && !exists('l:Callback')
     let error = self.preload(options.ns)
     if !empty(error)
       return error
